@@ -15,6 +15,9 @@ import (
 	"github.com/kvtools/valkeyrie/store"
 )
 
+// StoreName the name of the store.
+const StoreName = "redis"
+
 const (
 	noExpiration   = time.Duration(0)
 	defaultLockTTL = 60 * time.Second
@@ -31,52 +34,66 @@ var (
 	ErrAbortTryLock = errors.New("redis: lock operation aborted")
 )
 
-// Register registers Redis to valkeyrie.
-func Register() {
-	valkeyrie.AddStore(store.REDIS, New)
+// registers Redis to Valkeyrie.
+func init() {
+	valkeyrie.Register(StoreName, newStore)
 }
 
-// New creates a new Redis client given a list  of endpoints and optional tls config.
-func New(ctx context.Context, endpoints []string, options *store.Config) (store.Store, error) {
-	return NewWithCodec(ctx, endpoints, options, &RawCodec{})
+// Config the Redis configuration.
+type Config struct {
+	TLS      *tls.Config
+	Username string
+	Password string
+	DB       int
 }
 
-// NewWithCodec creates a new Redis client with codec config.
-func NewWithCodec(ctx context.Context, endpoints []string, options *store.Config, codec Codec) (store.Store, error) {
-	if len(endpoints) > 1 {
-		return nil, ErrMultipleEndpointsUnsupported
+func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
+	cfg, ok := options.(*Config)
+	if !ok && cfg != nil {
+		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
 	}
 
-	var tlsConfig *tls.Config
-	if options != nil && options.TLS != nil {
-		tlsConfig = options.TLS
-	}
-
-	var password string
-	if options != nil && options.Password != "" {
-		password = options.Password
-	}
-
-	return newRedis(ctx, endpoints, tlsConfig, password, codec), nil
+	return New(ctx, endpoints, cfg)
 }
 
-// Redis implements valkeyrie.Store interface with redis backend.
-type Redis struct {
+// Store implements the store.Store interface.
+type Store struct {
 	client *redis.Client
 	script *redis.Script
 	codec  Codec
 }
 
-func newRedis(ctx context.Context, endpoints []string, tlsConfig *tls.Config, password string, codec Codec) *Redis {
-	// TODO: use *redis.ClusterClient if we support multiple endpoints.
-	client := redis.NewClient(&redis.Options{
+// New creates a new Redis client.
+func New(ctx context.Context, endpoints []string, options *Config) (*Store, error) {
+	return NewWithCodec(ctx, endpoints, options, &RawCodec{})
+}
+
+// NewWithCodec creates a new Redis client with codec config.
+func NewWithCodec(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
+	if len(endpoints) > 1 {
+		return nil, ErrMultipleEndpointsUnsupported
+	}
+
+	return newRedis(ctx, endpoints, options, codec), nil
+}
+
+func newRedis(ctx context.Context, endpoints []string, options *Config, codec Codec) *Store {
+	opt := &redis.Options{
 		Addr:         endpoints[0],
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
-		TLSConfig:    tlsConfig,
-		Password:     password,
-	})
+	}
+
+	if options != nil {
+		opt.TLSConfig = options.TLS
+		opt.Username = options.Username
+		opt.Password = options.Password
+		opt.DB = options.DB
+	}
+
+	// TODO: use *redis.ClusterClient if we support multiple endpoints.
+	client := redis.NewClient(opt)
 
 	// Listen to Keyspace events.
 	client.ConfigSet(ctx, "notify-keyspace-events", "KEA")
@@ -86,7 +103,7 @@ func newRedis(ctx context.Context, endpoints []string, tlsConfig *tls.Config, pa
 		c = codec
 	}
 
-	return &Redis{
+	return &Store{
 		client: client,
 		script: redis.NewScript(luaScript()),
 		codec:  c,
@@ -94,7 +111,7 @@ func newRedis(ctx context.Context, endpoints []string, tlsConfig *tls.Config, pa
 }
 
 // Put a value at the specified key.
-func (r *Redis) Put(ctx context.Context, key string, value []byte, opts *store.WriteOptions) error {
+func (r *Store) Put(ctx context.Context, key string, value []byte, opts *store.WriteOptions) error {
 	expirationAfter := noExpiration
 	if opts != nil && opts.TTL != 0 {
 		expirationAfter = opts.TTL
@@ -107,7 +124,7 @@ func (r *Redis) Put(ctx context.Context, key string, value []byte, opts *store.W
 	}, expirationAfter)
 }
 
-func (r *Redis) setTTL(ctx context.Context, key string, val *store.KVPair, ttl time.Duration) error {
+func (r *Store) setTTL(ctx context.Context, key string, val *store.KVPair, ttl time.Duration) error {
 	valStr, err := r.codec.Encode(val)
 	if err != nil {
 		return err
@@ -117,11 +134,11 @@ func (r *Redis) setTTL(ctx context.Context, key string, val *store.KVPair, ttl t
 }
 
 // Get a value given its key.
-func (r *Redis) Get(ctx context.Context, key string, _ *store.ReadOptions) (*store.KVPair, error) {
+func (r *Store) Get(ctx context.Context, key string, _ *store.ReadOptions) (*store.KVPair, error) {
 	return r.get(ctx, normalize(key))
 }
 
-func (r *Redis) get(ctx context.Context, key string) (*store.KVPair, error) {
+func (r *Store) get(ctx context.Context, key string) (*store.KVPair, error) {
 	reply, err := r.client.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -142,12 +159,12 @@ func (r *Redis) get(ctx context.Context, key string) (*store.KVPair, error) {
 }
 
 // Delete the value at the specified key.
-func (r *Redis) Delete(ctx context.Context, key string) error {
+func (r *Store) Delete(ctx context.Context, key string) error {
 	return r.client.Del(ctx, normalize(key)).Err()
 }
 
 // Exists verify if a Key exists in the store.
-func (r *Redis) Exists(ctx context.Context, key string, _ *store.ReadOptions) (bool, error) {
+func (r *Store) Exists(ctx context.Context, key string, _ *store.ReadOptions) (bool, error) {
 	count, err := r.client.Exists(ctx, normalize(key)).Result()
 	return count != 0, err
 }
@@ -155,7 +172,7 @@ func (r *Redis) Exists(ctx context.Context, key string, _ *store.ReadOptions) (b
 // Watch for changes on a key.
 // glitch: we use notified-then-retrieve to retrieve *store.KVPair.
 // so the responses may sometimes inaccurate.
-func (r *Redis) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
+func (r *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
 	watchCh := make(chan *store.KVPair)
 	nKey := normalize(key)
 
@@ -191,7 +208,7 @@ func (r *Redis) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 }
 
 // WatchTree watches for changes on child nodes under a given directory.
-func (r *Redis) WatchTree(ctx context.Context, directory string, _ *store.ReadOptions) (<-chan []*store.KVPair, error) {
+func (r *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOptions) (<-chan []*store.KVPair, error) {
 	watchCh := make(chan []*store.KVPair)
 	nKey := normalize(directory)
 
@@ -229,7 +246,7 @@ func (r *Redis) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 // NewLock creates a lock for a given key.
 // The returned Locker is not held and must be acquired
 // with `.Lock`. The Value is optional.
-func (r *Redis) NewLock(_ context.Context, key string, opts *store.LockOptions) (store.Locker, error) {
+func (r *Store) NewLock(_ context.Context, key string, opts *store.LockOptions) (store.Locker, error) {
 	ttl := defaultLockTTL
 	var value []byte
 
@@ -254,11 +271,11 @@ func (r *Redis) NewLock(_ context.Context, key string, opts *store.LockOptions) 
 }
 
 // List the content of a given prefix.
-func (r *Redis) List(ctx context.Context, directory string, _ *store.ReadOptions) ([]*store.KVPair, error) {
+func (r *Store) List(ctx context.Context, directory string, _ *store.ReadOptions) ([]*store.KVPair, error) {
 	return r.list(ctx, normalize(directory))
 }
 
-func (r *Redis) list(ctx context.Context, directory string) ([]*store.KVPair, error) {
+func (r *Store) list(ctx context.Context, directory string) ([]*store.KVPair, error) {
 	regex := scanRegex(directory) // for all keyed with $directory.
 	allKeys, err := r.keys(ctx, regex)
 	if err != nil {
@@ -269,7 +286,7 @@ func (r *Redis) list(ctx context.Context, directory string) ([]*store.KVPair, er
 	return r.mget(ctx, directory, allKeys...)
 }
 
-func (r *Redis) keys(ctx context.Context, regex string) ([]string, error) {
+func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 	const (
 		startCursor  = 0
 		endCursor    = 0
@@ -302,13 +319,13 @@ func (r *Redis) keys(ctx context.Context, regex string) ([]string, error) {
 }
 
 // mget values given their keys.
-func (r *Redis) mget(ctx context.Context, directory string, keys ...string) ([]*store.KVPair, error) {
+func (r *Store) mget(ctx context.Context, directory string, keys ...string) ([]*store.KVPair, error) {
 	replies, err := r.client.MGet(ctx, keys...).Result()
 	if err != nil {
 		return nil, err
 	}
 
-	pairs := []*store.KVPair{}
+	var pairs []*store.KVPair
 	for i, reply := range replies {
 		var sreply string
 		if v, ok := reply.(string); ok {
@@ -338,7 +355,7 @@ func (r *Redis) mget(ctx context.Context, directory string, keys ...string) ([]*
 // DeleteTree deletes a range of keys under a given directory.
 // glitch: we list all available keys first and then delete them all
 // it costs two operations on redis, so is not atomicity.
-func (r *Redis) DeleteTree(ctx context.Context, directory string) error {
+func (r *Store) DeleteTree(ctx context.Context, directory string) error {
 	regex := scanRegex(normalize(directory)) // for all keyed with $directory.
 
 	allKeys, err := r.keys(ctx, regex)
@@ -352,7 +369,7 @@ func (r *Redis) DeleteTree(ctx context.Context, directory string) error {
 // AtomicPut is an atomic CAS operation on a single value.
 // Pass previous = nil to create a new key.
 // We introduced script on this page, so atomicity is guaranteed.
-func (r *Redis) AtomicPut(ctx context.Context, key string, value []byte, previous *store.KVPair, opts *store.WriteOptions) (bool, *store.KVPair, error) {
+func (r *Store) AtomicPut(ctx context.Context, key string, value []byte, previous *store.KVPair, opts *store.WriteOptions) (bool, *store.KVPair, error) {
 	expirationAfter := noExpiration
 	if opts != nil && opts.TTL != 0 {
 		expirationAfter = opts.TTL
@@ -379,7 +396,7 @@ func (r *Redis) AtomicPut(ctx context.Context, key string, value []byte, previou
 	return true, newKV, nil
 }
 
-func (r *Redis) setNX(ctx context.Context, key string, val *store.KVPair, expirationAfter time.Duration) error {
+func (r *Store) setNX(ctx context.Context, key string, val *store.KVPair, expirationAfter time.Duration) error {
 	valBlob, err := r.codec.Encode(val)
 	if err != nil {
 		return err
@@ -391,7 +408,7 @@ func (r *Redis) setNX(ctx context.Context, key string, val *store.KVPair, expira
 	return nil
 }
 
-func (r *Redis) cas(ctx context.Context, key string, oldPair, newPair *store.KVPair, secInStr string) error {
+func (r *Store) cas(ctx context.Context, key string, oldPair, newPair *store.KVPair, secInStr string) error {
 	newVal, err := r.codec.Encode(newPair)
 	if err != nil {
 		return err
@@ -407,14 +424,14 @@ func (r *Redis) cas(ctx context.Context, key string, oldPair, newPair *store.KVP
 
 // AtomicDelete is an atomic delete operation on a single value
 // the value will be deleted if previous matched the one stored in db.
-func (r *Redis) AtomicDelete(ctx context.Context, key string, previous *store.KVPair) (bool, error) {
+func (r *Store) AtomicDelete(ctx context.Context, key string, previous *store.KVPair) (bool, error) {
 	if err := r.cad(ctx, normalize(key), previous); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (r *Redis) cad(ctx context.Context, key string, old *store.KVPair) error {
+func (r *Store) cad(ctx context.Context, key string, old *store.KVPair) error {
 	oldVal, err := r.codec.Encode(old)
 	if err != nil {
 		return err
@@ -424,11 +441,11 @@ func (r *Redis) cad(ctx context.Context, key string, old *store.KVPair) error {
 }
 
 // Close the store connection.
-func (r *Redis) Close() error {
+func (r *Store) Close() error {
 	return r.client.Close()
 }
 
-func (r *Redis) runScript(ctx context.Context, args ...interface{}) error {
+func (r *Store) runScript(ctx context.Context, args ...interface{}) error {
 	err := r.script.Run(ctx, r.client, nil, args...).Err()
 	if err != nil && strings.Contains(err.Error(), "redis: key is not found") {
 		return store.ErrKeyNotFound
@@ -536,7 +553,7 @@ func (s *subscribe) receiveLoop(ctx context.Context, msgCh chan *redis.Message) 
 }
 
 type redisLock struct {
-	redis    *Redis
+	redis    *Store
 	last     *store.KVPair
 	unlockCh chan struct{}
 
@@ -645,7 +662,7 @@ func scanRegex(directory string) string {
 }
 
 func normalize(key string) string {
-	return strings.TrimPrefix(store.Normalize(key), "/")
+	return strings.TrimPrefix(key, "/")
 }
 
 func formatSec(dur time.Duration) string {

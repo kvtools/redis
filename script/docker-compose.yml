@@ -1,0 +1,15 @@
+version: "3.9"
+
+# when running test local, you can specify the image version using the
+# <service>_VERSION.
+# Example, to run consul with the version 1.8:
+# CONSUL_VERSION=1.8 make
+
+services:
+  redis:
+    image: redis:${REDIS_VERSION:-4.0.10}
+    container_name: redis
+    healthcheck:
+      test: redis-cli ping
+    ports:
+      - 6379:6379

@@ -7,7 +7,7 @@ import (
 
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
-	"github.com/kvtools/valkeyrie/testutils"
+	"github.com/kvtools/valkeyrie/testsuite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +22,7 @@ func makeRedisClient(t *testing.T) store.Store {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	kv := newRedis(ctx, []string{client}, nil, "", nil)
+	kv := newRedis(ctx, []string{client}, nil, nil)
 
 	// NOTE: please turn on redis's notification
 	// before you using watch/watchtree/lock related features.
@@ -32,16 +32,14 @@ func makeRedisClient(t *testing.T) store.Store {
 }
 
 func TestRegister(t *testing.T) {
-	Register()
-
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	kv, err := valkeyrie.NewStore(ctx, store.REDIS, []string{client}, nil)
+	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{client}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, kv)
 
-	assert.IsTypef(t, kv, new(Redis), "Error registering and initializing Redis")
+	assert.IsTypef(t, kv, new(Store), "Error registering and initializing Redis")
 }
 
 func TestRedisStore(t *testing.T) {
@@ -50,13 +48,13 @@ func TestRedisStore(t *testing.T) {
 	kvTTL := makeRedisClient(t)
 
 	t.Cleanup(func() {
-		testutils.RunCleanup(t, kv)
+		testsuite.RunCleanup(t, kv)
 	})
 
-	testutils.RunTestCommon(t, kv)
-	testutils.RunTestAtomic(t, kv)
-	testutils.RunTestWatch(t, kv)
-	testutils.RunTestLock(t, kv)
-	testutils.RunTestLockTTL(t, kv, lockTTL)
-	testutils.RunTestTTL(t, kv, kvTTL)
+	testsuite.RunTestCommon(t, kv)
+	testsuite.RunTestAtomic(t, kv)
+	testsuite.RunTestWatch(t, kv)
+	testsuite.RunTestLock(t, kv)
+	testsuite.RunTestLockTTL(t, kv, lockTTL)
+	testsuite.RunTestTTL(t, kv, kvTTL)
 }
