@@ -472,7 +472,7 @@ type getter func() (interface{}, error)
 type pusher func(interface{})
 
 func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push pusher) error {
-	// deliver the original data before we setup any events.
+	// deliver the original data before we set up any events.
 	pair, err := get()
 	if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
 		return err
