@@ -49,7 +49,7 @@ type Config struct {
 
 func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
 	cfg, ok := options.(*Config)
-	if !ok && cfg != nil {
+	if !ok && options != nil {
 		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
 	}
 
