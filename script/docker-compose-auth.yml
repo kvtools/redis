@@ -1,0 +1,19 @@
+version: "3.9"
+
+# when running test local, you can specify the image version using the env var REDIS_VERSION.
+# Example: REDIS_VERSION=7.0.5 make
+
+services:
+  redis:
+    image: redis:${REDIS_VERSION:-6.2.7}
+    container_name: redis
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: redis-cli ping
+    ports:
+      - "6379:6379"
+#    volumes:
+      # Add the right path
+#      - /home/ldez/sources/go/src/github.com/kvtools/redis/script/conf:/usr/local/etc/redis
