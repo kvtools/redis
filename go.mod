@@ -3,8 +3,8 @@ module github.com/kvtools/redis
 go 1.19
 
 require (
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/kvtools/valkeyrie v1.0.0
+	github.com/redis/go-redis/v9 v9.2.1
 	github.com/stretchr/testify v1.8.4
 )
 

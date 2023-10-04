@@ -5,7 +5,7 @@ version: "3.9"
 
 services:
   redis:
-    image: redis:${REDIS_VERSION:-4.0.10}
+    image: redis:${REDIS_VERSION:-7.2.1}
     container_name: redis
     healthcheck:
       test: redis-cli ping
