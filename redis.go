@@ -104,10 +104,6 @@ func New(ctx context.Context, endpoints []string, options *Config) (*Store, erro
 
 // NewWithCodec creates a new Redis client with codec config.
 func NewWithCodec(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
-	return newRedis(ctx, endpoints, options, codec)
-}
-
-func newRedis(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
 	client, err := newClient(endpoints, options)
 	if err != nil {
 		return nil, err

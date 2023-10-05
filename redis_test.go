@@ -20,7 +20,7 @@ func makeRedisClient(t *testing.T, endpoints []string, config *Config) store.Sto
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	kv, err := newRedis(ctx, endpoints, config, nil)
+	kv, err := NewWithCodec(ctx, endpoints, config, nil)
 	require.NoError(t, err)
 
 	// NOTE: please turn on redis's notification
