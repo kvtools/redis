@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
+	"github.com/redis/go-redis/v9"
 )
 
 // StoreName the name of the store.
@@ -32,6 +32,14 @@ var (
 	// by sending a signal to the stop chan,
 	// this is used to verify if the operation succeeded.
 	ErrAbortTryLock = errors.New("redis: lock operation aborted")
+
+	// ErrMasterSetMustBeProvided is thrown when Redis Sentinel is enabled
+	// and the MasterName option is undefined.
+	ErrMasterSetMustBeProvided = errors.New("master set name must be provided")
+
+	// ErrInvalidRoutesOptions is thrown when Redis Sentinel is enabled
+	// with RouteByLatency & RouteRandomly options without the ClusterClient.
+	ErrInvalidRoutesOptions = errors.New("RouteByLatency and RouteRandomly options are only allowed with the ClusterClient")
 )
 
 // registers Redis to Valkeyrie.
@@ -45,6 +53,32 @@ type Config struct {
 	Username string
 	Password string
 	DB       int
+	Sentinel *Sentinel
+}
+
+// Sentinel holds the Redis Sentinel configuration.
+type Sentinel struct {
+	MasterName string
+	Username   string
+	Password   string
+
+	// ClusterClient indicates whether to use the NewFailoverClusterClient to build the client.
+	ClusterClient bool
+
+	// Allows routing read-only commands to the closest master or replica node.
+	// This option only works with NewFailoverClusterClient.
+	RouteByLatency bool
+
+	// Allows routing read-only commands to the random master or replica node.
+	// This option only works with NewFailoverClusterClient.
+	RouteRandomly bool
+
+	// Route all commands to replica read-only nodes.
+	ReplicaOnly bool
+
+	// Use replicas disconnected with master when cannot get connected replicas
+	// Now, this option only works in RandomReplicaAddr function.
+	UseDisconnectedReplicas bool
 }
 
 func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
@@ -58,7 +92,7 @@ func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config)
 
 // Store implements the store.Store interface.
 type Store struct {
-	client *redis.Client
+	client redis.UniversalClient
 	script *redis.Script
 	codec  Codec
 }
@@ -70,14 +104,54 @@ func New(ctx context.Context, endpoints []string, options *Config) (*Store, erro
 
 // NewWithCodec creates a new Redis client with codec config.
 func NewWithCodec(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
+	client, err := newClient(endpoints, options)
+	if err != nil {
+		return nil, err
+	}
+
+	return makeStore(ctx, client, codec), nil
+}
+
+func newClient(endpoints []string, options *Config) (redis.UniversalClient, error) {
+	if options != nil && options.Sentinel != nil {
+		if options.Sentinel.MasterName == "" {
+			return nil, ErrMasterSetMustBeProvided
+		}
+
+		if !options.Sentinel.ClusterClient && (options.Sentinel.RouteByLatency || options.Sentinel.RouteRandomly) {
+			return nil, ErrInvalidRoutesOptions
+		}
+
+		cfg := &redis.FailoverOptions{
+			SentinelAddrs:           endpoints,
+			SentinelUsername:        options.Sentinel.Username,
+			SentinelPassword:        options.Sentinel.Password,
+			MasterName:              options.Sentinel.MasterName,
+			RouteByLatency:          options.Sentinel.RouteByLatency,
+			RouteRandomly:           options.Sentinel.RouteRandomly,
+			ReplicaOnly:             options.Sentinel.ReplicaOnly,
+			UseDisconnectedReplicas: options.Sentinel.UseDisconnectedReplicas,
+			Username:                options.Username,
+			Password:                options.Password,
+			DB:                      options.DB,
+			DialTimeout:             5 * time.Second,
+			ReadTimeout:             30 * time.Second,
+			WriteTimeout:            30 * time.Second,
+			ContextTimeoutEnabled:   true,
+			TLSConfig:               options.TLS,
+		}
+
+		if options.Sentinel.ClusterClient {
+			return redis.NewFailoverClusterClient(cfg), nil
+		}
+
+		return redis.NewFailoverClient(cfg), nil
+	}
+
 	if len(endpoints) > 1 {
 		return nil, ErrMultipleEndpointsUnsupported
 	}
 
-	return newRedis(ctx, endpoints, options, codec), nil
-}
-
-func newRedis(ctx context.Context, endpoints []string, options *Config, codec Codec) *Store {
 	opt := &redis.Options{
 		Addr:         endpoints[0],
 		DialTimeout:  5 * time.Second,
@@ -93,8 +167,10 @@ func newRedis(ctx context.Context, endpoints []string, options *Config, codec Co
 	}
 
 	// TODO: use *redis.ClusterClient if we support multiple endpoints.
-	client := redis.NewClient(opt)
+	return redis.NewClient(opt), nil
+}
 
+func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec) *Store {
 	// Listen to Keyspace events.
 	client.ConfigSet(ctx, "notify-keyspace-events", "KEA")
 
@@ -513,7 +589,7 @@ type subscribe struct {
 	closeCh chan struct{}
 }
 
-func newSubscribe(ctx context.Context, client *redis.Client, regex string) *subscribe {
+func newSubscribe(ctx context.Context, client redis.UniversalClient, regex string) *subscribe {
 	return &subscribe{
 		pubsub:  client.PSubscribe(ctx, regex),
 		closeCh: make(chan struct{}),

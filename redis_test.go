@@ -14,15 +14,16 @@ import (
 
 const testTimeout = 60 * time.Second
 
-const client = "localhost:6379"
+const testAddress = "localhost:6379"
 
-func makeRedisClient(t *testing.T) store.Store {
+func makeRedisClient(t *testing.T, endpoints []string, config *Config) store.Store {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	kv := newRedis(ctx, []string{client}, nil, nil)
+	kv, err := NewWithCodec(ctx, endpoints, config, nil)
+	require.NoError(t, err)
 
 	// NOTE: please turn on redis's notification
 	// before you using watch/watchtree/lock related features.
@@ -35,7 +36,7 @@ func TestRegister(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{client}, nil)
+	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{testAddress}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, kv)
 
@@ -43,9 +44,49 @@ func TestRegister(t *testing.T) {
 }
 
 func TestRedisStore(t *testing.T) {
-	kv := makeRedisClient(t)
-	lockTTL := makeRedisClient(t)
-	kvTTL := makeRedisClient(t)
+	kv := makeRedisClient(t, []string{testAddress}, nil)
+	lockTTL := makeRedisClient(t, []string{testAddress}, nil)
+	kvTTL := makeRedisClient(t, []string{testAddress}, nil)
+
+	t.Cleanup(func() {
+		testsuite.RunCleanup(t, kv)
+	})
+
+	testsuite.RunTestCommon(t, kv)
+	testsuite.RunTestAtomic(t, kv)
+	testsuite.RunTestWatch(t, kv)
+	testsuite.RunTestLock(t, kv)
+	testsuite.RunTestLockTTL(t, kv, lockTTL)
+	testsuite.RunTestTTL(t, kv, kvTTL)
+}
+
+func TestRedisSentinelStore(t *testing.T) {
+	endpoints := []string{"localhost:26379", "localhost:36379", "localhost:46379"}
+	config := &Config{Sentinel: &Sentinel{MasterName: "mymaster"}}
+
+	kv := makeRedisClient(t, endpoints, config)
+	lockTTL := makeRedisClient(t, endpoints, config)
+	kvTTL := makeRedisClient(t, endpoints, config)
+
+	t.Cleanup(func() {
+		testsuite.RunCleanup(t, kv)
+	})
+
+	testsuite.RunTestCommon(t, kv)
+	testsuite.RunTestAtomic(t, kv)
+	testsuite.RunTestWatch(t, kv)
+	testsuite.RunTestLock(t, kv)
+	testsuite.RunTestLockTTL(t, kv, lockTTL)
+	testsuite.RunTestTTL(t, kv, kvTTL)
+}
+
+func TestRedisSentinelStore_withClientCluster(t *testing.T) {
+	endpoints := []string{"localhost:26379", "localhost:36379", "localhost:46379"}
+	config := &Config{Sentinel: &Sentinel{MasterName: "mymaster", ClusterClient: true}}
+
+	kv := makeRedisClient(t, endpoints, config)
+	lockTTL := makeRedisClient(t, endpoints, config)
+	kvTTL := makeRedisClient(t, endpoints, config)
 
 	t.Cleanup(func() {
 		testsuite.RunCleanup(t, kv)
