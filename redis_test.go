@@ -14,6 +14,8 @@ import (
 
 const testTimeout = 60 * time.Second
 
+const testAddress = "localhost:6379"
+
 func makeRedisClient(t *testing.T, endpoints []string, config *Config) store.Store {
 	t.Helper()
 
@@ -34,7 +36,7 @@ func TestRegister(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{"localhost:6379"}, nil)
+	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{testAddress}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, kv)
 
@@ -42,9 +44,9 @@ func TestRegister(t *testing.T) {
 }
 
 func TestRedisStore(t *testing.T) {
-	kv := makeRedisClient(t, []string{"localhost:6379"}, nil)
-	lockTTL := makeRedisClient(t, []string{"localhost:6379"}, nil)
-	kvTTL := makeRedisClient(t, []string{"localhost:6379"}, nil)
+	kv := makeRedisClient(t, []string{testAddress}, nil)
+	lockTTL := makeRedisClient(t, []string{testAddress}, nil)
+	kvTTL := makeRedisClient(t, []string{testAddress}, nil)
 
 	t.Cleanup(func() {
 		testsuite.RunCleanup(t, kv)
@@ -78,7 +80,7 @@ func TestRedisSentinelStore(t *testing.T) {
 	testsuite.RunTestTTL(t, kv, kvTTL)
 }
 
-func TestRedisSentinelStore_WithClientCluster(t *testing.T) {
+func TestRedisSentinelStore_withClientCluster(t *testing.T) {
 	endpoints := []string{"localhost:26379", "localhost:36379", "localhost:46379"}
 	config := &Config{Sentinel: &Sentinel{MasterName: "mymaster", ClusterClient: true}}
 
