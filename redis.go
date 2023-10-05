@@ -108,6 +108,15 @@ func NewWithCodec(ctx context.Context, endpoints []string, options *Config, code
 }
 
 func newRedis(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
+	client, err := newClient(endpoints, options)
+	if err != nil {
+		return nil, err
+	}
+
+	return makeStore(ctx, client, codec), nil
+}
+
+func newClient(endpoints []string, options *Config) (redis.UniversalClient, error) {
 	if options != nil && options.Sentinel != nil {
 		if options.Sentinel.MasterName == "" {
 			return nil, ErrMasterSetMustBeProvided
@@ -136,14 +145,11 @@ func newRedis(ctx context.Context, endpoints []string, options *Config, codec Co
 			TLSConfig:               options.TLS,
 		}
 
-		var client redis.UniversalClient
 		if options.Sentinel.ClusterClient {
-			client = redis.NewFailoverClusterClient(cfg)
-		} else {
-			client = redis.NewFailoverClient(cfg)
+			return redis.NewFailoverClusterClient(cfg), nil
 		}
 
-		return makeStore(ctx, client, codec), nil
+		return redis.NewFailoverClient(cfg), nil
 	}
 
 	if len(endpoints) > 1 {
@@ -165,7 +171,7 @@ func newRedis(ctx context.Context, endpoints []string, options *Config, codec Co
 	}
 
 	// TODO: use *redis.ClusterClient if we support multiple endpoints.
-	return makeStore(ctx, redis.NewClient(opt), codec), nil
+	return redis.NewClient(opt), nil
 }
 
 func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec) *Store {
