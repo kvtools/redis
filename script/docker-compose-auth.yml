@@ -1,5 +1,3 @@
-version: "3.9"
-
 # when running test local, you can specify the image version using the env var REDIS_VERSION.
 # Example: REDIS_VERSION=7.0.5 make
 
