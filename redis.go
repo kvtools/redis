@@ -49,11 +49,13 @@ func init() {
 
 // Config the Redis configuration.
 type Config struct {
-	TLS      *tls.Config
-	Username string
-	Password string
-	DB       int
-	Sentinel *Sentinel
+	TLS            *tls.Config
+	Username       string
+	Password       string
+	DB             int
+	Sentinel       *Sentinel
+	PoolSize       int
+	MaxActiveConns int
 }
 
 // Sentinel holds the Redis Sentinel configuration.
@@ -139,6 +141,8 @@ func newClient(endpoints []string, options *Config) (redis.UniversalClient, erro
 			WriteTimeout:            30 * time.Second,
 			ContextTimeoutEnabled:   true,
 			TLSConfig:               options.TLS,
+			PoolSize:                options.PoolSize,
+			MaxActiveConns:          options.MaxActiveConns,
 		}
 
 		if options.Sentinel.ClusterClient {
@@ -164,6 +168,8 @@ func newClient(endpoints []string, options *Config) (redis.UniversalClient, erro
 		opt.Username = options.Username
 		opt.Password = options.Password
 		opt.DB = options.DB
+		opt.PoolSize = options.PoolSize
+		opt.MaxActiveConns = options.MaxActiveConns
 	}
 
 	// TODO: use *redis.ClusterClient if we support multiple endpoints.
