@@ -1,4 +1,4 @@
-m.PHONY: all
+.PHONY: all
 all: validate test clean
 
 ## Run validates
@@ -25,6 +25,7 @@ test-start-stack:
 ## Clean local data
 .PHONY: clean
 clean:
-	docker-compose -f script/docker-compose.yml down
-	docker-compose -f script/docker-compose-sentinel.yml down
+	rm -f ./script/conf/sentinel1.conf ./script/conf/sentinel2.conf ./script/conf/sentinel3.conf
+	docker-compose -f script/docker-compose.yml down --remove-orphans
+	docker-compose -f script/docker-compose-sentinel.yml down --remove-orphans
 	$(RM) goverage.report $(shell find . -type f -name *.out)

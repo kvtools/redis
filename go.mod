@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/kvtools/valkeyrie v1.0.0
 	github.com/redis/go-redis/v9 v9.2.1
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
