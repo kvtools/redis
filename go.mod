@@ -1,10 +1,10 @@
 module github.com/kvtools/redis
 
-go 1.19
+go 1.22
 
 require (
 	github.com/kvtools/valkeyrie v1.0.0
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/redis/go-redis/v9 v9.7.3
 	github.com/stretchr/testify v1.10.0
 )
 
