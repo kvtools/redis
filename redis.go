@@ -19,8 +19,9 @@ import (
 const StoreName = "redis"
 
 const (
-	noExpiration   = time.Duration(0)
-	defaultLockTTL = 60 * time.Second
+	noExpiration     = time.Duration(0)
+	defaultLockTTL   = 60 * time.Second
+	defaultScanCount = 10
 )
 
 var (
@@ -56,6 +57,8 @@ type Config struct {
 	Sentinel       *Sentinel
 	PoolSize       int
 	MaxActiveConns int
+
+	ScanCount int64
 }
 
 // Sentinel holds the Redis Sentinel configuration.
@@ -83,6 +86,10 @@ type Sentinel struct {
 	UseDisconnectedReplicas bool
 }
 
+type storeOptions struct {
+	ScanCount int64
+}
+
 func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
 	cfg, ok := options.(*Config)
 	if !ok && options != nil {
@@ -97,86 +104,98 @@ type Store struct {
 	client redis.UniversalClient
 	script *redis.Script
 	codec  Codec
+
+	opts storeOptions
 }
 
 // New creates a new Redis client.
-func New(ctx context.Context, endpoints []string, options *Config) (*Store, error) {
-	return NewWithCodec(ctx, endpoints, options, &RawCodec{})
+func New(ctx context.Context, endpoints []string, cfg *Config) (*Store, error) {
+	return NewWithCodec(ctx, endpoints, cfg, &RawCodec{})
 }
 
 // NewWithCodec creates a new Redis client with codec config.
-func NewWithCodec(ctx context.Context, endpoints []string, options *Config, codec Codec) (*Store, error) {
-	client, err := newClient(endpoints, options)
+func NewWithCodec(ctx context.Context, endpoints []string, cfg *Config, codec Codec) (*Store, error) {
+	client, err := newClient(endpoints, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return makeStore(ctx, client, codec), nil
+	opts := storeOptions{
+		ScanCount: defaultScanCount,
+	}
+
+	if cfg != nil {
+		if cfg.ScanCount > 0 {
+			opts.ScanCount = cfg.ScanCount
+		}
+	}
+
+	return makeStore(ctx, client, codec, opts), nil
 }
 
-func newClient(endpoints []string, options *Config) (redis.UniversalClient, error) {
-	if options != nil && options.Sentinel != nil {
-		if options.Sentinel.MasterName == "" {
+func newClient(endpoints []string, cfg *Config) (redis.UniversalClient, error) {
+	if cfg != nil && cfg.Sentinel != nil {
+		if cfg.Sentinel.MasterName == "" {
 			return nil, ErrMasterSetMustBeProvided
 		}
 
-		if !options.Sentinel.ClusterClient && (options.Sentinel.RouteByLatency || options.Sentinel.RouteRandomly) {
+		if !cfg.Sentinel.ClusterClient && (cfg.Sentinel.RouteByLatency || cfg.Sentinel.RouteRandomly) {
 			return nil, ErrInvalidRoutesOptions
 		}
 
-		cfg := &redis.FailoverOptions{
+		opts := &redis.FailoverOptions{
 			SentinelAddrs:           endpoints,
-			SentinelUsername:        options.Sentinel.Username,
-			SentinelPassword:        options.Sentinel.Password,
-			MasterName:              options.Sentinel.MasterName,
-			RouteByLatency:          options.Sentinel.RouteByLatency,
-			RouteRandomly:           options.Sentinel.RouteRandomly,
-			ReplicaOnly:             options.Sentinel.ReplicaOnly,
-			UseDisconnectedReplicas: options.Sentinel.UseDisconnectedReplicas,
-			Username:                options.Username,
-			Password:                options.Password,
-			DB:                      options.DB,
+			SentinelUsername:        cfg.Sentinel.Username,
+			SentinelPassword:        cfg.Sentinel.Password,
+			MasterName:              cfg.Sentinel.MasterName,
+			RouteByLatency:          cfg.Sentinel.RouteByLatency,
+			RouteRandomly:           cfg.Sentinel.RouteRandomly,
+			ReplicaOnly:             cfg.Sentinel.ReplicaOnly,
+			UseDisconnectedReplicas: cfg.Sentinel.UseDisconnectedReplicas,
+			Username:                cfg.Username,
+			Password:                cfg.Password,
+			DB:                      cfg.DB,
 			DialTimeout:             5 * time.Second,
 			ReadTimeout:             30 * time.Second,
 			WriteTimeout:            30 * time.Second,
 			ContextTimeoutEnabled:   true,
-			TLSConfig:               options.TLS,
-			PoolSize:                options.PoolSize,
-			MaxActiveConns:          options.MaxActiveConns,
+			TLSConfig:               cfg.TLS,
+			PoolSize:                cfg.PoolSize,
+			MaxActiveConns:          cfg.MaxActiveConns,
 		}
 
-		if options.Sentinel.ClusterClient {
-			return redis.NewFailoverClusterClient(cfg), nil
+		if cfg.Sentinel.ClusterClient {
+			return redis.NewFailoverClusterClient(opts), nil
 		}
 
-		return redis.NewFailoverClient(cfg), nil
+		return redis.NewFailoverClient(opts), nil
 	}
 
 	if len(endpoints) > 1 {
 		return nil, ErrMultipleEndpointsUnsupported
 	}
 
-	opt := &redis.Options{
+	opts := &redis.Options{
 		Addr:         endpoints[0],
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 
-	if options != nil {
-		opt.TLSConfig = options.TLS
-		opt.Username = options.Username
-		opt.Password = options.Password
-		opt.DB = options.DB
-		opt.PoolSize = options.PoolSize
-		opt.MaxActiveConns = options.MaxActiveConns
+	if cfg != nil {
+		opts.TLSConfig = cfg.TLS
+		opts.Username = cfg.Username
+		opts.Password = cfg.Password
+		opts.DB = cfg.DB
+		opts.PoolSize = cfg.PoolSize
+		opts.MaxActiveConns = cfg.MaxActiveConns
 	}
 
 	// TODO: use *redis.ClusterClient if we support multiple endpoints.
-	return redis.NewClient(opt), nil
+	return redis.NewClient(opts), nil
 }
 
-func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec) *Store {
+func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec, opts storeOptions) *Store {
 	// Listen to Keyspace events.
 	client.ConfigSet(ctx, "notify-keyspace-events", "KEA")
 
@@ -189,6 +208,7 @@ func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec) *
 		client: client,
 		script: redis.NewScript(luaScript()),
 		codec:  c,
+		opts:   opts,
 	}
 }
 
@@ -370,14 +390,13 @@ func (r *Store) list(ctx context.Context, directory string) ([]*store.KVPair, er
 
 func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 	const (
-		startCursor  = 0
-		endCursor    = 0
-		defaultCount = 10
+		startCursor = 0
+		endCursor   = 0
 	)
 
 	var allKeys []string
 
-	keys, nextCursor, err := r.client.Scan(ctx, startCursor, regex, defaultCount).Result()
+	keys, nextCursor, err := r.client.Scan(ctx, startCursor, regex, r.opts.ScanCount).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +404,7 @@ func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 	allKeys = append(allKeys, keys...)
 
 	for nextCursor != endCursor {
-		keys, nextCursor, err = r.client.Scan(ctx, nextCursor, regex, defaultCount).Result()
+		keys, nextCursor, err = r.client.Scan(ctx, nextCursor, regex, r.opts.ScanCount).Result()
 		if err != nil {
 			return nil, err
 		}
