@@ -370,9 +370,14 @@ func (r *Store) list(ctx context.Context, directory string) ([]*store.KVPair, er
 
 func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 	const (
-		startCursor  = 0
-		endCursor    = 0
-		defaultCount = 10
+		startCursor = 0
+		endCursor   = 0
+		// SCAN page size. Each page is one client round trip, so this
+		// directly divides the number of round trips a full walk costs:
+		// at COUNT 10 a 100k-key database takes ~10k round trips per List,
+		// at 1000 it takes ~100. Values in this range keep individual SCAN
+		// calls cheap for the server while making large keyspaces usable.
+		defaultCount = 1000
 	)
 
 	var allKeys []string
@@ -400,37 +405,52 @@ func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 	return allKeys, nil
 }
 
+// Cap on keys per MGET call. A single MGET of an entire large tree is one
+// long-running command on the server and one oversized reply for the client;
+// chunking bounds both while keeping the round-trip count low.
+const mgetBatchSize = 5000
+
 // mget values given their keys.
 func (r *Store) mget(ctx context.Context, directory string, keys ...string) ([]*store.KVPair, error) {
-	replies, err := r.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, err
-	}
-
 	var pairs []*store.KVPair
-	for i, reply := range replies {
-		var sreply string
-		if v, ok := reply.(string); ok {
-			sreply = v
-		}
-		if sreply == "" {
-			// empty reply.
-			continue
-		}
 
-		pair := &store.KVPair{}
-		if err := r.codec.Decode([]byte(sreply), pair); err != nil {
+	for start := 0; start < len(keys); start += mgetBatchSize {
+		end := start + mgetBatchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[start:end]
+
+		replies, err := r.client.MGet(ctx, batch...).Result()
+		if err != nil {
 			return nil, err
 		}
 
-		if pair.Key == "" {
-			pair.Key = keys[i]
-		}
+		for i, reply := range replies {
+			var sreply string
+			if v, ok := reply.(string); ok {
+				sreply = v
+			}
+			if sreply == "" {
+				// empty reply.
+				continue
+			}
 
-		if normalize(pair.Key) != directory {
-			pairs = append(pairs, pair)
+			pair := &store.KVPair{}
+			if err := r.codec.Decode([]byte(sreply), pair); err != nil {
+				return nil, err
+			}
+
+			if pair.Key == "" {
+				pair.Key = batch[i]
+			}
+
+			if normalize(pair.Key) != directory {
+				pairs = append(pairs, pair)
+			}
 		}
 	}
+
 	return pairs, nil
 }
 
@@ -547,6 +567,10 @@ func regexWatch(key string, withChildren bool) string {
 	return fmt.Sprintf("__keyspace*:%s", key)
 }
 
+// How long watchLoop waits after a keyspace event for further events before
+// re-reading. See the coalescing comment in watchLoop.
+const watchDebounce = 500 * time.Millisecond
+
 // getter defines a func type which retrieves data from remote storage.
 type getter func() (interface{}, error)
 
@@ -566,6 +590,23 @@ func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push 
 
 	push(pair)
 
+	// retrieve and send back.
+	readAndPush := func(payload string) error {
+		pair, err := get()
+		if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
+			return err
+		}
+
+		// in case of watching a key that has been expired or deleted return and empty KV.
+		if errors.Is(err, store.ErrKeyNotFound) && (payload == "expired" || payload == "del") {
+			pair = &store.KVPair{}
+		}
+
+		push(pair)
+
+		return nil
+	}
+
 	for m := range msgCh {
 		select {
 		case <-ctx.Done():
@@ -573,18 +614,50 @@ func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push 
 		default:
 		}
 
-		// retrieve and send back.
-		pair, err := get()
-		if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
+		// Every keyspace event triggers a full re-read of the watched key or
+		// tree, so N writes in quick succession would otherwise cost N full
+		// SCAN+MGET passes — on large trees the reads can't keep up and the
+		// loop re-reads back-to-back indefinitely. Instead, re-read
+		// immediately on the first event (leading edge), then coalesce
+		// everything that arrives within watchDebounce into a single
+		// follow-up read (trailing edge), repeating while the burst lasts.
+		// Isolated changes still propagate instantly; sustained bursts cost
+		// at most one read per watchDebounce.
+		if err := readAndPush(m.Payload); err != nil {
 			return err
 		}
 
-		// in case of watching a key that has been expired or deleted return and empty KV.
-		if errors.Is(err, store.ErrKeyNotFound) && (m.Payload == "expired" || m.Payload == "del") {
-			pair = &store.KVPair{}
-		}
+		for {
+			pending := false
+			lastPayload := ""
 
-		push(pair)
+			settle := time.NewTimer(watchDebounce)
+		drain:
+			for {
+				select {
+				case next, ok := <-msgCh:
+					if !ok {
+						break drain
+					}
+					pending = true
+					lastPayload = next.Payload
+				case <-settle.C:
+					break drain
+				case <-ctx.Done():
+					settle.Stop()
+					return ctx.Err()
+				}
+			}
+			settle.Stop()
+
+			if !pending {
+				break
+			}
+
+			if err := readAndPush(lastPayload); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
