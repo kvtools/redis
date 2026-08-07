@@ -8,6 +8,7 @@ import (
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
 	"github.com/kvtools/valkeyrie/testsuite"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,4 +99,63 @@ func TestRedisSentinelStore_withClientCluster(t *testing.T) {
 	testsuite.RunTestLock(t, kv)
 	testsuite.RunTestLockTTL(t, kv, lockTTL)
 	testsuite.RunTestTTL(t, kv, kvTTL)
+}
+
+func TestWatchLoopLeadingAndTrailingDebounce(t *testing.T) {
+	ctx := t.Context()
+
+	debounce := 500 * time.Millisecond
+
+	r := &Store{
+		opts: storeOptions{
+			WatchDebounce: debounce,
+		},
+	}
+
+	msgCh := make(chan *redis.Message)
+	pushCh := make(chan any, 4)
+
+	get := getter(func() (any, error) {
+		return nil, store.ErrKeyNotFound
+	})
+	push := pusher(func(value any) {
+		pushCh <- value
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- r.watchLoop(ctx, msgCh, get, push)
+	}()
+
+	require.IsType(t, &store.KVPair{}, receiveWatchValue(t, debounce, pushCh))
+
+	msgCh <- &redis.Message{Payload: "set"}
+	assert.Nil(t, receiveWatchValue(t, debounce, pushCh))
+
+	msgCh <- &redis.Message{Payload: "set"}
+	time.Sleep(debounce / 2)
+	msgCh <- &redis.Message{Payload: "del"}
+
+	select {
+	case value := <-pushCh:
+		t.Fatalf("received trailing value before debounce elapsed: %#v", value)
+	case <-time.After(debounce / 2):
+	}
+
+	require.IsType(t, &store.KVPair{}, receiveWatchValue(t, debounce, pushCh))
+
+	close(msgCh)
+	require.NoError(t, <-errCh)
+}
+
+func receiveWatchValue(t *testing.T, debounce time.Duration, values <-chan any) any {
+	t.Helper()
+
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(2 * debounce):
+		t.Fatal("timed out waiting for watched value")
+		return nil
+	}
 }

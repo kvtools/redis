@@ -59,8 +59,9 @@ type Config struct {
 	PoolSize       int
 	MaxActiveConns int
 
-	ScanCount int64
-	BatchSize int
+	ScanCount     int64
+	BatchSize     int
+	WatchDebounce time.Duration
 }
 
 // Sentinel holds the Redis Sentinel configuration.
@@ -89,8 +90,9 @@ type Sentinel struct {
 }
 
 type storeOptions struct {
-	ScanCount int64
-	BatchSize int
+	ScanCount     int64
+	BatchSize     int
+	WatchDebounce time.Duration
 }
 
 func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
@@ -132,6 +134,10 @@ func NewWithCodec(ctx context.Context, endpoints []string, cfg *Config, codec Co
 
 		if cfg.ScanCount > 0 {
 			opts.ScanCount = cfg.ScanCount
+		}
+
+		if cfg.WatchDebounce > 0 {
+			opts.WatchDebounce = cfg.WatchDebounce
 		}
 	}
 
@@ -306,7 +312,7 @@ func (r *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 		}()
 
 		msgCh := sub.Receive(ctx)
-		if err := watchLoop(ctx, msgCh, get, push); err != nil {
+		if err := r.watchLoop(ctx, msgCh, get, push); err != nil {
 			log.Printf("watchLoop in Watch err: %v", err)
 		}
 	}(ctx, sub, get, push)
@@ -342,7 +348,7 @@ func (r *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 		}()
 
 		msgCh := sub.Receive(ctx)
-		if err := watchLoop(ctx, msgCh, get, push); err != nil {
+		if err := r.watchLoop(ctx, msgCh, get, push); err != nil {
 			log.Printf("watchLoop in WatchTree err:%v\n", err)
 		}
 	}(ctx, sub, get, push)
@@ -590,7 +596,7 @@ type getter func() (any, error)
 // pusher defines a func type which pushes data blob into watch channel.
 type pusher func(any)
 
-func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push pusher) error {
+func (r *Store) watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push pusher) error {
 	// deliver the original data before we set up any events.
 	pair, err := get()
 	if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
@@ -603,26 +609,102 @@ func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push 
 
 	push(pair)
 
-	for m := range msgCh {
+	if r.opts.WatchDebounce > 0 {
+		return r.watchLoopDebounced(ctx, msgCh, get, push)
+	}
+
+	for msg := range msgCh {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// retrieve and send back.
-		pair, err := get()
-		if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
+		if err := retrieveAndSendBack(get, push, msg); err != nil {
 			return err
 		}
-
-		// in case of watching a key that has been expired or deleted return and empty KV.
-		if errors.Is(err, store.ErrKeyNotFound) && (m.Payload == "expired" || m.Payload == "del") {
-			pair = &store.KVPair{}
-		}
-
-		push(pair)
 	}
+
+	return nil
+}
+
+//nolint:gocognit // Debouncing requires a complexity.
+func (r *Store) watchLoopDebounced(ctx context.Context, msgCh chan *redis.Message, get getter, push pusher) error {
+	var (
+		timer      *time.Timer
+		timerCh    <-chan time.Time
+		pendingMsg *redis.Message
+	)
+
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case msg, ok := <-msgCh:
+			if !ok {
+				if pendingMsg != nil {
+					return retrieveAndSendBack(get, push, pendingMsg)
+				}
+
+				return nil
+			}
+
+			if timer == nil {
+				if err := retrieveAndSendBack(get, push, msg); err != nil {
+					return err
+				}
+
+				timer = time.NewTimer(r.opts.WatchDebounce)
+				timerCh = timer.C
+
+				continue
+			}
+
+			pendingMsg = msg
+
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+
+			timer.Reset(r.opts.WatchDebounce)
+
+		case <-timerCh:
+			timer = nil
+			timerCh = nil
+
+			if pendingMsg != nil {
+				if err := retrieveAndSendBack(get, push, pendingMsg); err != nil {
+					return err
+				}
+
+				pendingMsg = nil
+			}
+		}
+	}
+}
+
+func retrieveAndSendBack(get getter, push pusher, msg *redis.Message) error {
+	pair, err := get()
+	if err != nil && !errors.Is(err, store.ErrKeyNotFound) {
+		return err
+	}
+
+	// in case of watching a key that has been expired or deleted return and empty KV.
+	if errors.Is(err, store.ErrKeyNotFound) && (msg.Payload == "expired" || msg.Payload == "del") {
+		pair = &store.KVPair{}
+	}
+
+	push(pair)
 
 	return nil
 }
