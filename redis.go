@@ -22,6 +22,7 @@ const (
 	noExpiration     = time.Duration(0)
 	defaultLockTTL   = 60 * time.Second
 	defaultScanCount = 10
+	defaultBatchSize = 0
 )
 
 var (
@@ -59,6 +60,7 @@ type Config struct {
 	MaxActiveConns int
 
 	ScanCount int64
+	BatchSize int
 }
 
 // Sentinel holds the Redis Sentinel configuration.
@@ -88,6 +90,7 @@ type Sentinel struct {
 
 type storeOptions struct {
 	ScanCount int64
+	BatchSize int
 }
 
 func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
@@ -125,6 +128,8 @@ func NewWithCodec(ctx context.Context, endpoints []string, cfg *Config, codec Co
 	}
 
 	if cfg != nil {
+		opts.BatchSize = cfg.BatchSize
+
 		if cfg.ScanCount > 0 {
 			opts.ScanCount = cfg.ScanCount
 		}
@@ -421,35 +426,48 @@ func (r *Store) keys(ctx context.Context, regex string) ([]string, error) {
 
 // mget values given their keys.
 func (r *Store) mget(ctx context.Context, directory string, keys ...string) ([]*store.KVPair, error) {
-	replies, err := r.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, err
+	var pairs []*store.KVPair
+
+	batchSize := r.opts.BatchSize
+	if batchSize <= defaultBatchSize {
+		batchSize = len(keys)
 	}
 
-	var pairs []*store.KVPair
-	for i, reply := range replies {
-		var sreply string
-		if v, ok := reply.(string); ok {
-			sreply = v
-		}
-		if sreply == "" {
-			// empty reply.
-			continue
-		}
+	for start := 0; start < len(keys); start += batchSize {
+		end := min(start+batchSize, len(keys))
 
-		pair := &store.KVPair{}
-		if err := r.codec.Decode([]byte(sreply), pair); err != nil {
+		batch := keys[start:end]
+
+		replies, err := r.client.MGet(ctx, batch...).Result()
+		if err != nil {
 			return nil, err
 		}
 
-		if pair.Key == "" {
-			pair.Key = keys[i]
-		}
+		for i, reply := range replies {
+			var sreply string
+			if v, ok := reply.(string); ok {
+				sreply = v
+			}
+			if sreply == "" {
+				// empty reply.
+				continue
+			}
 
-		if normalize(pair.Key) != directory {
-			pairs = append(pairs, pair)
+			pair := &store.KVPair{}
+			if err := r.codec.Decode([]byte(sreply), pair); err != nil {
+				return nil, err
+			}
+
+			if pair.Key == "" {
+				pair.Key = batch[i]
+			}
+
+			if normalize(pair.Key) != directory {
+				pairs = append(pairs, pair)
+			}
 		}
 	}
+
 	return pairs, nil
 }
 
@@ -546,7 +564,7 @@ func (r *Store) Close() error {
 	return r.client.Close()
 }
 
-func (r *Store) runScript(ctx context.Context, args ...interface{}) error {
+func (r *Store) runScript(ctx context.Context, args ...any) error {
 	err := r.script.Run(ctx, r.client, nil, args...).Err()
 	if err != nil && strings.Contains(err.Error(), "redis: key is not found") {
 		return store.ErrKeyNotFound
@@ -567,10 +585,10 @@ func regexWatch(key string, withChildren bool) string {
 }
 
 // getter defines a func type which retrieves data from remote storage.
-type getter func() (interface{}, error)
+type getter func() (any, error)
 
 // pusher defines a func type which pushes data blob into watch channel.
-type pusher func(interface{})
+type pusher func(any)
 
 func watchLoop(ctx context.Context, msgCh chan *redis.Message, get getter, push pusher) error {
 	// deliver the original data before we set up any events.
