@@ -2,13 +2,12 @@
 
 [![GoDoc](https://godoc.org/github.com/kvtools/redis?status.png)](https://godoc.org/github.com/kvtools/redis)
 [![Build Status](https://github.com/kvtools/redis/actions/workflows/build.yml/badge.svg)](https://github.com/kvtools/redis/actions/workflows/build.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/kvtools/redis)](https://goreportcard.com/report/github.com/kvtools/redis)
 
 [`valkeyrie`](https://github.com/kvtools/valkeyrie) provides a Go native library to store metadata using Distributed Key/Value stores (or common databases).
 
 ## Compatibility
 
-A **storage backend** in `valkeyrie` implements (fully or partially) the [Store](https://github.com/kvtools/valkeyrie/blob/master/store/store.go#L69) interface.
+A **storage backend** in `valkeyrie` implements (fully or partially) the [Store](https://github.com/kvtools/valkeyrie/blob/main/store/store.go#L12) interface.
 
 | Calls                 | Redis |
 |-----------------------|:-----:|
