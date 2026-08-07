@@ -130,10 +130,13 @@ func TestWatchLoopLeadingAndTrailingDebounce(t *testing.T) {
 	require.IsType(t, &store.KVPair{}, receiveWatchValue(t, debounce, pushCh))
 
 	msgCh <- &redis.Message{Payload: "set"}
+
 	assert.Nil(t, receiveWatchValue(t, debounce, pushCh))
 
 	msgCh <- &redis.Message{Payload: "set"}
+
 	time.Sleep(debounce / 2)
+
 	msgCh <- &redis.Message{Payload: "del"}
 
 	select {

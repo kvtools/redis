@@ -42,10 +42,12 @@ linters:
     - ineffassign
     - makezero
     - misspell
+    - modernize
     - nakedret
     - nestif
     - nilerr
     - noctx
+    - noinlineerr
     - nolintlint
     - predeclared
     - promlinter
@@ -59,6 +61,7 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
+    - wsl_v5
 
   settings:
     depguard:

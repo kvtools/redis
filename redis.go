@@ -95,15 +95,6 @@ type storeOptions struct {
 	WatchDebounce time.Duration
 }
 
-func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
-	cfg, ok := options.(*Config)
-	if !ok && options != nil {
-		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
-	}
-
-	return New(ctx, endpoints, cfg)
-}
-
 // Store implements the store.Store interface.
 type Store struct {
 	client redis.UniversalClient
@@ -206,6 +197,15 @@ func newClient(endpoints []string, cfg *Config) (redis.UniversalClient, error) {
 	return redis.NewClient(opts), nil
 }
 
+func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
+	cfg, ok := options.(*Config)
+	if !ok && options != nil {
+		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
+	}
+
+	return New(ctx, endpoints, cfg)
+}
+
 func makeStore(ctx context.Context, client redis.UniversalClient, codec Codec, opts storeOptions) *Store {
 	// Listen to Keyspace events.
 	client.ConfigSet(ctx, "notify-keyspace-events", "KEA")
@@ -257,10 +257,14 @@ func (r *Store) get(ctx context.Context, key string) (*store.KVPair, error) {
 		if errors.Is(err, redis.Nil) {
 			return nil, store.ErrKeyNotFound
 		}
+
 		return nil, err
 	}
+
 	val := store.KVPair{}
-	if err := r.codec.Decode(reply, &val); err != nil {
+
+	err = r.codec.Decode(reply, &val)
+	if err != nil {
 		return nil, err
 	}
 
@@ -289,15 +293,16 @@ func (r *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 	watchCh := make(chan *store.KVPair)
 	nKey := normalize(key)
 
-	get := getter(func() (interface{}, error) {
+	get := getter(func() (any, error) {
 		pair, err := r.get(ctx, nKey)
 		if err != nil {
 			return nil, err
 		}
+
 		return pair, nil
 	})
 
-	push := pusher(func(v interface{}) {
+	push := pusher(func(v any) {
 		if val, ok := v.(*store.KVPair); ok {
 			watchCh <- val
 		}
@@ -308,11 +313,14 @@ func (r *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 	go func(ctx context.Context, sub *subscribe, get getter, push pusher) {
 		defer func() {
 			close(watchCh)
+
 			_ = sub.Close()
 		}()
 
 		msgCh := sub.Receive(ctx)
-		if err := r.watchLoop(ctx, msgCh, get, push); err != nil {
+
+		err := r.watchLoop(ctx, msgCh, get, push)
+		if err != nil {
 			log.Printf("watchLoop in Watch err: %v", err)
 		}
 	}(ctx, sub, get, push)
@@ -325,15 +333,16 @@ func (r *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 	watchCh := make(chan []*store.KVPair)
 	nKey := normalize(directory)
 
-	get := getter(func() (interface{}, error) {
+	get := getter(func() (any, error) {
 		pair, err := r.list(ctx, nKey)
 		if err != nil {
 			return nil, err
 		}
+
 		return pair, nil
 	})
 
-	push := pusher(func(v interface{}) {
+	push := pusher(func(v any) {
 		if p, ok := v.([]*store.KVPair); ok {
 			watchCh <- p
 		}
@@ -344,11 +353,14 @@ func (r *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 	go func(ctx context.Context, sub *subscribe, get getter, push pusher) {
 		defer func() {
 			close(watchCh)
+
 			_ = sub.Close()
 		}()
 
 		msgCh := sub.Receive(ctx)
-		if err := r.watchLoop(ctx, msgCh, get, push); err != nil {
+
+		err := r.watchLoop(ctx, msgCh, get, push)
+		if err != nil {
 			log.Printf("watchLoop in WatchTree err:%v\n", err)
 		}
 	}(ctx, sub, get, push)
@@ -361,6 +373,7 @@ func (r *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 // with `.Lock`. The Value is optional.
 func (r *Store) NewLock(_ context.Context, key string, opts *store.LockOptions) (store.Locker, error) {
 	ttl := defaultLockTTL
+
 	var value []byte
 
 	if opts != nil {
@@ -390,6 +403,7 @@ func (r *Store) List(ctx context.Context, directory string, _ *store.ReadOptions
 
 func (r *Store) list(ctx context.Context, directory string) ([]*store.KVPair, error) {
 	regex := scanRegex(directory) // for all keyed with $directory.
+
 	allKeys, err := r.keys(ctx, regex)
 	if err != nil {
 		return nil, err
@@ -451,16 +465,20 @@ func (r *Store) mget(ctx context.Context, directory string, keys ...string) ([]*
 
 		for i, reply := range replies {
 			var sreply string
+
 			if v, ok := reply.(string); ok {
 				sreply = v
 			}
+
 			if sreply == "" {
 				// empty reply.
 				continue
 			}
 
 			pair := &store.KVPair{}
-			if err := r.codec.Decode([]byte(sreply), pair); err != nil {
+
+			err = r.codec.Decode([]byte(sreply), pair)
+			if err != nil {
 				return nil, err
 			}
 
@@ -509,15 +527,19 @@ func (r *Store) AtomicPut(ctx context.Context, key string, value []byte, previou
 
 	// if previous == nil, set directly.
 	if previous == nil {
-		if err := r.setNX(ctx, nKey, newKV, expirationAfter); err != nil {
+		err := r.setNX(ctx, nKey, newKV, expirationAfter)
+		if err != nil {
 			return false, nil, err
 		}
+
 		return true, newKV, nil
 	}
 
-	if err := r.cas(ctx, nKey, previous, newKV, formatSec(expirationAfter)); err != nil {
+	err := r.cas(ctx, nKey, previous, newKV, formatSec(expirationAfter))
+	if err != nil {
 		return false, nil, err
 	}
+
 	return true, newKV, nil
 }
 
@@ -530,6 +552,7 @@ func (r *Store) setNX(ctx context.Context, key string, val *store.KVPair, expira
 	if !r.client.SetNX(ctx, key, valBlob, expirationAfter).Val() {
 		return store.ErrKeyExists
 	}
+
 	return nil
 }
 
@@ -550,9 +573,11 @@ func (r *Store) cas(ctx context.Context, key string, oldPair, newPair *store.KVP
 // AtomicDelete is an atomic delete operation on a single value
 // the value will be deleted if previous matched the one stored in db.
 func (r *Store) AtomicDelete(ctx context.Context, key string, previous *store.KVPair) (bool, error) {
-	if err := r.cad(ctx, normalize(key), previous); err != nil {
+	err := r.cad(ctx, normalize(key), previous)
+	if err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 
@@ -572,22 +597,20 @@ func (r *Store) Close() error {
 
 func (r *Store) runScript(ctx context.Context, args ...any) error {
 	err := r.script.Run(ctx, r.client, nil, args...).Err()
-	if err != nil && strings.Contains(err.Error(), "redis: key is not found") {
-		return store.ErrKeyNotFound
-	}
-	if err != nil && strings.Contains(err.Error(), "redis: value has been changed") {
-		return store.ErrKeyModified
-	}
-	return err
-}
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "redis: key is not found"):
+			return store.ErrKeyNotFound
 
-func regexWatch(key string, withChildren bool) string {
-	if withChildren {
-		// For all database and keys with $key prefix.
-		return fmt.Sprintf("__keyspace*:%s*", key)
+		case strings.Contains(err.Error(), "redis: value has been changed"):
+			return store.ErrKeyModified
+
+		default:
+			return err
+		}
 	}
-	// For all database and keys with $key.
-	return fmt.Sprintf("__keyspace*:%s", key)
+
+	return nil
 }
 
 // getter defines a func type which retrieves data from remote storage.
@@ -620,7 +643,8 @@ func (r *Store) watchLoop(ctx context.Context, msgCh chan *redis.Message, get ge
 		default:
 		}
 
-		if err := retrieveAndSendBack(get, push, msg); err != nil {
+		err = retrieveAndSendBack(get, push, msg)
+		if err != nil {
 			return err
 		}
 	}
@@ -657,7 +681,8 @@ func (r *Store) watchLoopDebounced(ctx context.Context, msgCh chan *redis.Messag
 			}
 
 			if timer == nil {
-				if err := retrieveAndSendBack(get, push, msg); err != nil {
+				err := retrieveAndSendBack(get, push, msg)
+				if err != nil {
 					return err
 				}
 
@@ -683,7 +708,8 @@ func (r *Store) watchLoopDebounced(ctx context.Context, msgCh chan *redis.Messag
 			timerCh = nil
 
 			if pendingMsg != nil {
-				if err := retrieveAndSendBack(get, push, pendingMsg); err != nil {
+				err := retrieveAndSendBack(get, push, pendingMsg)
+				if err != nil {
 					return err
 				}
 
@@ -691,6 +717,15 @@ func (r *Store) watchLoopDebounced(ctx context.Context, msgCh chan *redis.Messag
 			}
 		}
 	}
+}
+
+func regexWatch(key string, withChildren bool) string {
+	if withChildren {
+		// For all database and keys with $key prefix.
+		return fmt.Sprintf("__keyspace*:%s*", key)
+	}
+	// For all database and keys with $key.
+	return fmt.Sprintf("__keyspace*:%s", key)
 }
 
 func retrieveAndSendBack(get getter, push pusher, msg *redis.Message) error {
@@ -728,7 +763,9 @@ func (s *subscribe) Close() error {
 
 func (s *subscribe) Receive(ctx context.Context) chan *redis.Message {
 	msgCh := make(chan *redis.Message)
+
 	go s.receiveLoop(ctx, msgCh)
+
 	return msgCh
 }
 
@@ -746,6 +783,7 @@ func (s *subscribe) receiveLoop(ctx context.Context, msgCh chan *redis.Message) 
 			if err != nil {
 				return
 			}
+
 			if msg != nil {
 				msgCh <- msg
 			}
@@ -770,6 +808,7 @@ func (l *redisLock) Lock(ctx context.Context) (<-chan struct{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if success {
 		return lockHeld, nil
 	}
@@ -789,6 +828,7 @@ func (l *redisLock) Lock(ctx context.Context) (<-chan struct{}, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			if success {
 				return lockHeld, nil
 			}
@@ -805,13 +845,17 @@ func (l *redisLock) tryLock(ctx context.Context, lockHeld chan struct{}) (bool, 
 	})
 	if success {
 		l.last = item
+
 		// keep holding.
 		go l.holdLock(ctx, lockHeld)
+
 		return true, nil
 	}
+
 	if errors.Is(err, store.ErrKeyNotFound) || errors.Is(err, store.ErrKeyModified) || errors.Is(err, store.ErrKeyExists) {
 		return false, nil
 	}
+
 	return false, err
 }
 
@@ -822,10 +866,13 @@ func (l *redisLock) holdLock(ctx context.Context, lockHeld chan struct{}) {
 		_, item, err := l.redis.AtomicPut(ctx, l.key, l.value, l.last, &store.WriteOptions{
 			TTL: l.ttl,
 		})
-		if err == nil {
-			l.last = item
+		if err != nil {
+			return err
 		}
-		return err
+
+		l.last = item
+
+		return nil
 	}
 
 	heartbeat := time.NewTicker(l.ttl / 3)
@@ -834,7 +881,8 @@ func (l *redisLock) holdLock(ctx context.Context, lockHeld chan struct{}) {
 	for {
 		select {
 		case <-heartbeat.C:
-			if err := hold(); err != nil {
+			err := hold()
+			if err != nil {
 				return
 			}
 		case <-l.unlockCh:
